@@ -10,4 +10,14 @@ data class Kitchen(
     val weeklyMenu: List<MenuDay>
 )
 
-data class MenuDay(val day: String, val lunch: String, val dinner: String)
+data class MenuDay(
+    val day: String,
+    val breakfast: String,
+    val lunch: String,
+    val dinner: String
+)
+
+enum class SubscriptionPlan(val label: String, val mealCredits: Int) {
+    SIX_DAY("6 Days Plan", 6),
+    TWENTY_SIX_DAY("26 Days Plan", 26)
+}

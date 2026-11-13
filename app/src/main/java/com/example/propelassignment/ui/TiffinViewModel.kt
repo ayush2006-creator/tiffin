@@ -6,8 +6,10 @@ import androidx.lifecycle.viewModelScope
 import com.example.propelassignment.analytics.Analytics
 import com.example.propelassignment.data.Kitchen
 import com.example.propelassignment.data.KitchenRepository
+import com.example.propelassignment.data.SubscriptionPlan
 import com.example.propelassignment.persistence.AppPreferences
 import com.example.propelassignment.persistence.PurchaseState
+import com.example.propelassignment.persistence.BookedDabba
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -19,6 +21,7 @@ sealed interface AppDestination {
     data object KitchenList : AppDestination
     data class KitchenDetail(val kitchen: Kitchen) : AppDestination
     data class Paywall(val kitchen: Kitchen?) : AppDestination
+    data object BookedDabbas : AppDestination
 }
 
 sealed interface KitchenLoadState {
@@ -31,7 +34,9 @@ sealed interface KitchenLoadState {
 data class TiffinUiState(
     val kitchenLoadState: KitchenLoadState = KitchenLoadState.Loading,
     val destination: AppDestination = AppDestination.KitchenList,
-    val purchaseState: PurchaseState = PurchaseState(isPaid = false, purchaseTimestamp = null),
+    val purchaseState: PurchaseState = PurchaseState(isPaid = false, purchaseTimestamp = null, plan = null, remainingBookings = 0),
+    val selectedPlan: SubscriptionPlan = SubscriptionPlan.SIX_DAY,
+    val bookedDabbas: List<BookedDabba> = emptyList(),
     val selectedMenuDay: Int = 0,
     val purchaseSaveError: Boolean = false
 )
@@ -43,10 +48,13 @@ class TiffinViewModel(
     private val analytics: Analytics,
     launchCount: Int
 ) : ViewModel() {
+    private val persistedPurchase = preferences.purchaseState()
     private val _uiState = MutableStateFlow(
         TiffinUiState(
-            purchaseState = preferences.purchaseState(),
-            destination = if (launchCount == THIRD_LAUNCH && !preferences.purchaseState().isPaid) {
+            purchaseState = persistedPurchase,
+            selectedPlan = persistedPurchase.plan ?: SubscriptionPlan.SIX_DAY,
+            bookedDabbas = preferences.bookedDabbas(),
+            destination = if (launchCount == THIRD_LAUNCH && !persistedPurchase.isPaid) {
                 AppDestination.Paywall(null)
             } else {
                 AppDestination.KitchenList
@@ -89,11 +97,16 @@ class TiffinViewModel(
         }
     }
 
+    fun selectPlan(plan: SubscriptionPlan) {
+        if (!_uiState.value.purchaseState.isPaid) _uiState.update { it.copy(selectedPlan = plan) }
+    }
+
     fun goBack() {
         val destination = _uiState.value.destination
         _uiState.update {
             it.copy(destination = when (destination) {
                 is AppDestination.Paywall -> destination.kitchen?.let(AppDestination::KitchenDetail) ?: AppDestination.KitchenList
+                AppDestination.BookedDabbas -> AppDestination.KitchenList
                 else -> AppDestination.KitchenList
             })
         }
@@ -101,13 +114,25 @@ class TiffinViewModel(
 
     fun completePurchase() {
         val timestamp = System.currentTimeMillis()
-        if (preferences.completePurchase(timestamp)) {
+        val plan = _uiState.value.selectedPlan
+        if (preferences.completePurchase(timestamp, plan)) {
             val state = preferences.purchaseState()
             analytics.track("purchase_completed", mapOf("price" to "1"))
-            _uiState.update { it.copy(purchaseState = state, purchaseSaveError = false, destination = AppDestination.KitchenList) }
+            val returnKitchen = (_uiState.value.destination as? AppDestination.Paywall)?.kitchen
+            _uiState.update { it.copy(purchaseState = state, purchaseSaveError = false, destination = returnKitchen?.let(AppDestination::KitchenDetail) ?: AppDestination.KitchenList) }
         } else {
             _uiState.update { it.copy(purchaseSaveError = true) }
         }
+    }
+
+    fun bookDabba(kitchen: Kitchen) {
+        if (preferences.bookDabba(kitchen) != null) {
+            _uiState.update { it.copy(purchaseState = preferences.purchaseState(), bookedDabbas = preferences.bookedDabbas(), destination = AppDestination.BookedDabbas) }
+        }
+    }
+
+    fun openBookedDabbas() {
+        _uiState.update { it.copy(bookedDabbas = preferences.bookedDabbas(), destination = AppDestination.BookedDabbas) }
     }
 
     class Factory(

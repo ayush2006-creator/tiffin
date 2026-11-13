@@ -2,10 +2,14 @@ package com.example.propelassignment.data
 
 import android.content.Context
 import org.json.JSONArray
+import org.json.JSONObject
 
 class KitchenRepository(private val context: Context) {
     fun loadKitchens(): List<Kitchen> {
         val raw = context.assets.open("kitchens.json").bufferedReader().use { it.readText() }
+        val breakfasts = JSONObject(
+            context.assets.open("breakfasts.json").bufferedReader().use { it.readText() }
+        )
         val kitchens = JSONArray(raw)
         return List(kitchens.length()) { index ->
             val item = kitchens.getJSONObject(index)
@@ -16,7 +20,12 @@ class KitchenRepository(private val context: Context) {
                 foodType = item.getString("foodType"), rating = item.getDouble("rating"),
                 weeklyMenu = List(weekly.length()) { day ->
                     val menu = weekly.getJSONObject(day)
-                    MenuDay(menu.getString("day"), menu.getString("lunch"), menu.getString("dinner"))
+                    MenuDay(
+                        day = menu.getString("day"),
+                        breakfast = breakfasts.getString(menu.getString("day")),
+                        lunch = menu.getString("lunch"),
+                        dinner = menu.getString("dinner")
+                    )
                 }
             )
         }
