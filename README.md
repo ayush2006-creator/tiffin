@@ -157,7 +157,7 @@ The Logcat output below shows the tracked launch, kitchen view, subscribe click,
 
 ### Screen recording
 
-[Watch the app walkthrough video](docs/app-demo.mp4) - demonstrates the kitchen, subscription, and analytics flow.
+[Watch the app walkthrough video in this repository](docs/app-demo.mp4) or [watch it on Google Drive](https://drive.google.com/file/d/1-Gu1RlOiMSTlV5BKvLp8SA3MElrPmIj4/view?usp=sharing) - demonstrates the kitchen, subscription, and analytics flow.
 
 ## Manual verification checklist
 
