@@ -57,16 +57,25 @@ class AppPreferences(context: Context) {
 
     fun activeSubscriptions(): List<PurchaseState> = kitchenSubscriptions()
 
-    fun mealPreferences() = MealPreferences(
-        extraChapatis = preferences.getBoolean(EXTRA_CHAPATIS, false),
-        gheeFree = preferences.getBoolean(GHEE_FREE, false),
-        lessOil = preferences.getBoolean(LESS_OIL, false)
+    fun isAppSubscribed(): Boolean = preferences.getBoolean(IS_PAID, false)
+
+    /** Records the one-time app membership when it is bought before any kitchen plan. */
+    fun completeAppSubscription(timestamp: Long): Boolean = preferences.edit()
+        .putBoolean(IS_PAID, true)
+        .putLong(PURCHASE_TIMESTAMP, timestamp)
+        .commit()
+
+    /** Meal customisation belongs to a kitchen, never to the whole application. */
+    fun mealPreferences(kitchenId: String) = MealPreferences(
+        extraChapatis = preferences.getBoolean(preferenceKey(EXTRA_CHAPATIS, kitchenId), false),
+        gheeFree = preferences.getBoolean(preferenceKey(GHEE_FREE, kitchenId), false),
+        lessOil = preferences.getBoolean(preferenceKey(LESS_OIL, kitchenId), false)
     )
 
-    fun saveMealPreferences(value: MealPreferences): Boolean = preferences.edit()
-        .putBoolean(EXTRA_CHAPATIS, value.extraChapatis)
-        .putBoolean(GHEE_FREE, value.gheeFree)
-        .putBoolean(LESS_OIL, value.lessOil)
+    fun saveMealPreferences(kitchenId: String, value: MealPreferences): Boolean = preferences.edit()
+        .putBoolean(preferenceKey(EXTRA_CHAPATIS, kitchenId), value.extraChapatis)
+        .putBoolean(preferenceKey(GHEE_FREE, kitchenId), value.gheeFree)
+        .putBoolean(preferenceKey(LESS_OIL, kitchenId), value.lessOil)
         .commit()
 
     /** Persists both purchase values atomically before the UI shows success. */
@@ -151,6 +160,8 @@ class AppPreferences(context: Context) {
     }
 
     private fun emptyPurchaseState() = PurchaseState(false, null, null, 0, null, null, null)
+
+    private fun preferenceKey(base: String, kitchenId: String) = "${base}_$kitchenId"
 
     private fun subscriptionsToJson(subscriptions: List<PurchaseState>) = JSONArray().apply {
         subscriptions.forEach { state -> put(JSONObject().apply { put("kitchenId", state.kitchenId); put("kitchenName", state.kitchenName); put("plan", state.plan?.name); put("purchaseTimestamp", state.purchaseTimestamp); put("remainingBookings", state.remainingBookings); put("validUntilTimestamp", state.validUntilTimestamp) }) }

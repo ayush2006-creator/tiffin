@@ -32,7 +32,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -60,23 +59,41 @@ fun TiffinApp(viewModel: TiffinViewModel) {
             is AppDestination.KitchenDetail -> DetailScreen(
                 kitchen = current.kitchen,
                 isPaid = uiState.purchaseState.isPaid,
-                plan = uiState.selectedPlan,
+                plan = uiState.selectedPlansByKitchen[current.kitchen.id] ?: SubscriptionPlan.SIX_DAY,
                 purchasedPlan = uiState.purchaseState.plan,
                 purchasedKitchenId = uiState.purchaseState.kitchenId,
-                purchasedKitchenName = uiState.purchaseState.kitchenName,
                 validUntilTimestamp = uiState.purchaseState.validUntilTimestamp,
                 remainingBookings = uiState.purchaseState.remainingBookings,
                 selectedDay = uiState.selectedMenuDay,
                 onBack = viewModel::goBack,
                 onDaySelect = viewModel::selectMenuDay,
-                onPlanSelect = viewModel::selectPlan,
-                onExtend = { plan -> viewModel.extendPlan(current.kitchen, plan) },
+                onPlanSelect = { plan -> viewModel.selectPlan(current.kitchen.id, plan) },
+                onExtend = { plan -> viewModel.startExtension(current.kitchen, plan) },
                 mealPreferences = uiState.mealPreferences,
-                onMealPreferencesChange = viewModel::updateMealPreferences,
+                onMealPreferencesChange = { change -> viewModel.updateMealPreferences(current.kitchen.id, change) },
                 onSubscribe = { viewModel.onSubscribe(current.kitchen) },
                 onBook = { viewModel.bookDabba(current.kitchen) }
             )
-            is AppDestination.Paywall -> PaywallScreen(current.kitchen, uiState.selectedPlan, viewModel::goBack, viewModel::completePurchase, uiState.purchaseSaveError)
+            is AppDestination.Paywall -> PaywallScreen(
+                kitchen = current.kitchen,
+                plan = current.plan,
+                charges = paywallCharges(current.kitchen, current.plan, uiState.isAppSubscribed),
+                title = "Your homestyle meal plan",
+                subtitle = "Start your ${current.kitchen.name} subscription today.",
+                onBack = viewModel::goBack,
+                onComplete = viewModel::completePurchase,
+                purchaseSaveError = uiState.purchaseSaveError
+            )
+            AppDestination.AppSubscriptionPaywall -> PaywallScreen(
+                kitchen = null,
+                plan = null,
+                charges = listOf(PaywallCharge("One-time app subscription", 1, "Activate Dabba Service on this device")),
+                title = "Welcome to Dabba Service",
+                subtitle = "Activate your app subscription to start choosing kitchen plans.",
+                onBack = viewModel::goBack,
+                onComplete = viewModel::completePurchase,
+                purchaseSaveError = uiState.purchaseSaveError
+            )
             AppDestination.BookedDabbas -> BookedDabbasScreen(uiState.subscriptions, uiState.bookedDabbas, viewModel::goBack)
         }
     }
@@ -84,7 +101,7 @@ fun TiffinApp(viewModel: TiffinViewModel) {
 
 @Composable private fun KitchenList(state: KitchenLoadState, onKitchen: (Kitchen) -> Unit, onRetry: () -> Unit, onBookings: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
-        AppHeader("Kadugudabba", "Home kitchens near you", onBookings)
+        AppHeader("Dabba Service", "Home kitchens near you", onBookings)
         when (state) {
             KitchenLoadState.Loading -> CenterMessage { CircularProgressIndicator(color = MaterialTheme.colorScheme.primary) }
             KitchenLoadState.Empty -> CenterMessage { Text("No kitchens are available yet. Please check back shortly.") }
@@ -169,7 +186,6 @@ private fun mealImageFor(kitchenId: String): Int = when (kitchenId) {
     plan: SubscriptionPlan,
     purchasedPlan: SubscriptionPlan?,
     purchasedKitchenId: String?,
-    purchasedKitchenName: String?,
     validUntilTimestamp: Long?,
     remainingBookings: Int,
     selectedDay: Int,
@@ -198,8 +214,6 @@ private fun mealImageFor(kitchenId: String): Int = when (kitchenId) {
         item { KitchenSummary(kitchen) }
         if (isPurchasedKitchen && purchasedPlan != null && validUntilTimestamp != null) {
             item { PurchasedPlanPanel(purchasedPlan, validUntilTimestamp, remainingBookings) }
-        } else if (isPaid) {
-            item { OtherKitchenPlanPanel(purchasedKitchenName ?: "another kitchen") }
         }
         item { DeliveryTrustRow() }
         item {
@@ -221,14 +235,14 @@ private fun mealImageFor(kitchenId: String): Int = when (kitchenId) {
             MealTray("◔", "Dinner Dabba", "Light & High-Protein Night Meal • 540 kcal", day.dinner, "Wholesome")
         }
         item { CustomizationCard(mealPreferences, onMealPreferencesChange) }
-        if (!isPaid || isPurchasedKitchen) item { SubscriptionPlans(kitchen.pricePerTiffin, plan, purchasedPlan, isPurchasedKitchen, onPlanSelect, onExtend) }
+        item { SubscriptionPlans(kitchen.pricePerTiffin, plan, purchasedPlan, isPurchasedKitchen, onPlanSelect, onExtend) }
         item { TestimonialCard() }
         item { Spacer(Modifier.height(4.dp)) }
     }
     Surface(shadowElevation = 8.dp, color = MaterialTheme.colorScheme.surface) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) { Text(if (isPurchasedKitchen) "₹${kitchen.pricePerTiffin}" else "₹${kitchen.pricePerTiffin * plan.mealCredits}", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary); Text(if (isPurchasedKitchen) "Actual dabba value • prepaid" else if (isPaid) "Plan belongs to $purchasedKitchenName" else "${plan.mealCredits} dabbas • ₹${kitchen.pricePerTiffin} each", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            Button(onClick = if (isPurchasedKitchen) onBook else onSubscribe, enabled = !isPaid || (isPurchasedKitchen && remainingBookings > 0), modifier = Modifier.height(48.dp), shape = RoundedCornerShape(50)) { Text(if (isPurchasedKitchen) "Book Dabba (${remainingBookings})" else if (isPaid) "Purchased elsewhere" else "Subscribe Plan  →") }
+            Column(Modifier.weight(1f)) { Text(if (isPurchasedKitchen) "₹${kitchen.pricePerTiffin}" else "₹${kitchen.pricePerTiffin * plan.mealCredits}", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary); Text(if (isPurchasedKitchen) "Actual dabba value • prepaid" else "${plan.mealCredits} dabbas • ₹${kitchen.pricePerTiffin} each", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            Button(onClick = if (isPurchasedKitchen && remainingBookings > 0) onBook else onSubscribe, modifier = Modifier.height(48.dp), shape = RoundedCornerShape(50)) { Text(if (isPurchasedKitchen && remainingBookings > 0) "Book Dabba (${remainingBookings})" else if (isPurchasedKitchen) "Extend Plan  →" else "Subscribe Plan  →") }
         }
     }
 }
@@ -285,8 +299,6 @@ private fun mealImageFor(kitchenId: String): Int = when (kitchenId) {
     Card(shape = RoundedCornerShape(12.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)) { Column(Modifier.padding(14.dp)) { Text("✓ YOU HAVE PURCHASED THIS KITCHEN", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary); Text(plan.label, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onTertiaryContainer); Text("Booked up to $validUntil • $remainingBookings dabba credits left", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onTertiaryContainer); Spacer(Modifier.height(4.dp)); Text("Need more dabbas? Extend your plan below.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onTertiaryContainer) } }
 }
 
-@Composable private fun OtherKitchenPlanPanel(kitchenName: String) = Card(shape = RoundedCornerShape(12.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) { Column(Modifier.padding(14.dp)) { Text("SUBSCRIPTION ALREADY ACTIVE", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary); Text("Your plan was purchased from $kitchenName.", style = MaterialTheme.typography.titleMedium); Text("Bookings and plan extensions are available only from that kitchen.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
-
 @Composable private fun SubscriptionPlans(dabbaPrice: Int, selectedPlan: SubscriptionPlan, purchasedPlan: SubscriptionPlan?, extending: Boolean, onSelect: (SubscriptionPlan) -> Unit, onExtend: (SubscriptionPlan) -> Unit) = Column { Row { Text(if (extending) "Extend your plan" else "Subscription Plans", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge); Text("${dabbaPrice}/dabba", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary) }; Spacer(Modifier.height(8.dp)); Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { PlanCard(SubscriptionPlan.SIX_DAY, dabbaPrice, if (extending) purchasedPlan == SubscriptionPlan.SIX_DAY else selectedPlan == SubscriptionPlan.SIX_DAY, extending, { if (extending) onExtend(it) else onSelect(it) }, Modifier.weight(1f)); PlanCard(SubscriptionPlan.TWENTY_SIX_DAY, dabbaPrice, if (extending) purchasedPlan == SubscriptionPlan.TWENTY_SIX_DAY else selectedPlan == SubscriptionPlan.TWENTY_SIX_DAY, extending, { if (extending) onExtend(it) else onSelect(it) }, Modifier.weight(1f)) } }
 
 @Composable private fun PlanCard(plan: SubscriptionPlan, dabbaPrice: Int, selected: Boolean, extending: Boolean, onSelect: (SubscriptionPlan) -> Unit, modifier: Modifier) = Card(modifier = modifier.clickable { onSelect(plan) }, shape = RoundedCornerShape(12.dp), border = if (selected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), colors = CardDefaults.cardColors(containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)) { Column(Modifier.padding(12.dp)) { Text(if (extending) "EXTEND" else if (plan == SubscriptionPlan.SIX_DAY) "WEEKLY HABIT" else "MONTHLY VALUE", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary); Spacer(Modifier.height(8.dp)); Text(if (extending) "Add ${plan.mealCredits} Dabbas" else plan.label, style = MaterialTheme.typography.titleMedium); Text("${plan.mealCredits} prepaid dabbas", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant); Spacer(Modifier.height(10.dp)); Text("₹${dabbaPrice * plan.mealCredits}", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary); Text("₹$dabbaPrice per dabba", style = MaterialTheme.typography.labelSmall) } }
@@ -322,23 +334,26 @@ private fun mealImageFor(kitchenId: String): Int = when (kitchenId) {
     }
 }
 
-@Composable private fun PaywallScreen(kitchen: Kitchen?, plan: SubscriptionPlan, onBack: () -> Unit, onComplete: () -> Unit, purchaseSaveError: Boolean) {
-    val timestamp = remember { System.currentTimeMillis() }
-    val date = remember(timestamp) { DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(timestamp + 24 * 60 * 60 * 1000L)) }
-    val kitchenPlanCost = (kitchen?.pricePerTiffin ?: 0) * plan.mealCredits
+private fun paywallCharges(kitchen: Kitchen, plan: SubscriptionPlan, isAppSubscribed: Boolean): List<PaywallCharge> = buildList {
+    add(PaywallCharge("${kitchen.name} • ${plan.label}", kitchen.pricePerTiffin * plan.mealCredits, "${plan.mealCredits} dabbas at ₹${kitchen.pricePerTiffin} each"))
+    if (!isAppSubscribed) add(PaywallCharge("One-time app subscription", 1, "Required once to activate Dabba Service"))
+}
+
+@Composable private fun PaywallScreen(kitchen: Kitchen?, plan: SubscriptionPlan?, charges: List<PaywallCharge>, title: String, subtitle: String, onBack: () -> Unit, onComplete: () -> Unit, purchaseSaveError: Boolean) {
+    val payableTotal = charges.sumOf { it.amount }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item { Text("‹", Modifier.clickable(onClick = onBack), style = MaterialTheme.typography.headlineSmall) }
-        item { Text("Your homestyle meal plan", style = MaterialTheme.typography.displaySmall) }
-        item { Text(if (kitchen == null) "A weekly subscription to delicious local home food." else "Start your ${kitchen.name} subscription today.", style = MaterialTheme.typography.bodyLarge) }
-        item { Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.primaryContainer) { Column(Modifier.padding(12.dp)) { Text("Selected: ${plan.label}", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onPrimaryContainer); Text("₹$kitchenPlanCost • ${plan.mealCredits} dabbas at ₹${kitchen?.pricePerTiffin ?: 0} each", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onPrimaryContainer); Text("₹1 is the simulated app subscription fee, not the kitchen dabba price.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onPrimaryContainer) } } }
-        item { BillingTimeline(date, kitchenPlanCost) }
+        item { Text(title, style = MaterialTheme.typography.displaySmall) }
+        item { Text(subtitle, style = MaterialTheme.typography.bodyLarge) }
+        item { Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.primaryContainer) { Column(Modifier.padding(12.dp)) { plan?.let { Text("Selected: ${it.label}", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onPrimaryContainer) }; Text("₹$payableTotal total", style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.onPrimaryContainer); charges.forEach { charge -> Text("${charge.label} • ₹${charge.amount}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onPrimaryContainer) } } } }
+        item { BillingTimeline(charges) }
         if (purchaseSaveError) item { Text("We couldn't save your subscription. Please try again.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
         item { Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) { Column(Modifier.padding(16.dp)) { Text("Simulated purchase", style = MaterialTheme.typography.titleMedium); Text("No payment SDK or real charge is used. This prototype only records your confirmation on this device.", style = MaterialTheme.typography.bodySmall) } } }
-        item { Button(onClick = onComplete, modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(50), enabled = kitchen != null) { Text("Subscribe for ₹$kitchenPlanCost") } }
+        item { Button(onClick = onComplete, modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(50)) { Text("Subscribe for ₹$payableTotal") } }
         item { Text("By continuing, you agree to the disclosed billing schedule. You may cancel any time in this prototype.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     }
 }
 
-@Composable private fun BillingTimeline(futureDate: String, kitchenPlanCost: Int) = Card(border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) { Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) { Text("Transparent billing timeline", style = MaterialTheme.typography.titleMedium); Row { Text("1", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold); Spacer(Modifier.width(12.dp)); Column { Text("Today (instant)", style = MaterialTheme.typography.titleMedium); Text("₹1 simulated app subscription fee.", style = MaterialTheme.typography.bodyMedium) } }; Divider(); Row { Text("2", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold); Spacer(Modifier.width(12.dp)); Column { Text("Kitchen plan", style = MaterialTheme.typography.titleMedium); Text("₹$kitchenPlanCost for your selected dabbas, valid from $futureDate.", style = MaterialTheme.typography.bodyMedium) } } } }
+@Composable private fun BillingTimeline(charges: List<PaywallCharge>) = Card(border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) { Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) { Text("Payment breakdown", style = MaterialTheme.typography.titleMedium); charges.forEachIndexed { index, charge -> Row { Text("${index + 1}", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold); Spacer(Modifier.width(12.dp)); Column { Text(charge.label, style = MaterialTheme.typography.titleMedium); Text("₹${charge.amount} • ${charge.detail}", style = MaterialTheme.typography.bodyMedium) } }; if (index != charges.lastIndex) Divider() } } }
 
 @Composable private fun CenterMessage(content: @Composable () -> Unit) = androidx.compose.foundation.layout.Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) { content() }

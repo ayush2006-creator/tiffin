@@ -21,9 +21,17 @@ import kotlinx.coroutines.launch
 sealed interface AppDestination {
     data object KitchenList : AppDestination
     data class KitchenDetail(val kitchen: Kitchen) : AppDestination
-    data class Paywall(val kitchen: Kitchen?) : AppDestination
+    data class Paywall(val kitchen: Kitchen, val plan: SubscriptionPlan) : AppDestination
+    data object AppSubscriptionPaywall : AppDestination
     data object BookedDabbas : AppDestination
 }
+
+/** A row shown by the single reusable paywall. The caller decides which charges apply. */
+data class PaywallCharge(
+    val label: String,
+    val amount: Int,
+    val detail: String
+)
 
 sealed interface KitchenLoadState {
     data object Loading : KitchenLoadState
@@ -36,9 +44,10 @@ data class TiffinUiState(
     val kitchenLoadState: KitchenLoadState = KitchenLoadState.Loading,
     val destination: AppDestination = AppDestination.KitchenList,
     val purchaseState: PurchaseState = PurchaseState(isPaid = false, purchaseTimestamp = null, plan = null, remainingBookings = 0, kitchenId = null, kitchenName = null, validUntilTimestamp = null),
-    val selectedPlan: SubscriptionPlan = SubscriptionPlan.SIX_DAY,
+    val selectedPlansByKitchen: Map<String, SubscriptionPlan> = emptyMap(),
     val bookedDabbas: List<BookedDabba> = emptyList(),
     val subscriptions: List<PurchaseState> = emptyList(),
+    val isAppSubscribed: Boolean = false,
     val mealPreferences: MealPreferences = MealPreferences(),
     val selectedMenuDay: Int = 0,
     val purchaseSaveError: Boolean = false
@@ -55,12 +64,11 @@ class TiffinViewModel(
     private val _uiState = MutableStateFlow(
         TiffinUiState(
             purchaseState = persistedPurchase,
-            selectedPlan = persistedPurchase.plan ?: SubscriptionPlan.SIX_DAY,
             bookedDabbas = preferences.bookedDabbas(),
             subscriptions = preferences.activeSubscriptions(),
-            mealPreferences = preferences.mealPreferences(),
-            destination = if (launchCount == THIRD_LAUNCH && !persistedPurchase.isPaid) {
-                AppDestination.Paywall(null)
+            isAppSubscribed = preferences.isAppSubscribed(),
+            destination = if (launchCount == THIRD_LAUNCH && !preferences.isAppSubscribed()) {
+                AppDestination.AppSubscriptionPaywall
             } else {
                 AppDestination.KitchenList
             }
@@ -89,7 +97,15 @@ class TiffinViewModel(
     fun openKitchen(kitchen: Kitchen) {
         analytics.track("kitchen_viewed", mapOf("kitchen_id" to kitchen.id))
         val kitchenPurchase = preferences.purchaseStateFor(kitchen.id)
-        _uiState.update { it.copy(destination = AppDestination.KitchenDetail(kitchen), purchaseState = kitchenPurchase, selectedPlan = kitchenPurchase.plan ?: SubscriptionPlan.SIX_DAY, selectedMenuDay = 0) }
+        _uiState.update { current ->
+            current.copy(
+                destination = AppDestination.KitchenDetail(kitchen),
+                purchaseState = kitchenPurchase,
+                selectedPlansByKitchen = current.selectedPlansByKitchen + (kitchen.id to (current.selectedPlansByKitchen[kitchen.id] ?: kitchenPurchase.plan ?: SubscriptionPlan.SIX_DAY)),
+                mealPreferences = preferences.mealPreferences(kitchen.id),
+                selectedMenuDay = 0
+            )
+        }
     }
 
     fun selectMenuDay(index: Int) {
@@ -98,20 +114,20 @@ class TiffinViewModel(
 
     fun onSubscribe(kitchen: Kitchen) {
         analytics.track("subscribe_clicked", mapOf("kitchen_id" to kitchen.id))
-        if (!_uiState.value.purchaseState.isPaid) {
-            _uiState.update { it.copy(destination = AppDestination.Paywall(kitchen)) }
-        }
+        val plan = _uiState.value.selectedPlansByKitchen[kitchen.id] ?: SubscriptionPlan.SIX_DAY
+        _uiState.update { it.copy(destination = AppDestination.Paywall(kitchen, plan), purchaseSaveError = false) }
     }
 
-    fun selectPlan(plan: SubscriptionPlan) {
-        _uiState.update { it.copy(selectedPlan = plan) }
+    fun selectPlan(kitchenId: String, plan: SubscriptionPlan) {
+        _uiState.update { it.copy(selectedPlansByKitchen = it.selectedPlansByKitchen + (kitchenId to plan)) }
     }
 
     fun goBack() {
         val destination = _uiState.value.destination
         _uiState.update {
             it.copy(destination = when (destination) {
-                is AppDestination.Paywall -> destination.kitchen?.let(AppDestination::KitchenDetail) ?: AppDestination.KitchenList
+                is AppDestination.Paywall -> AppDestination.KitchenDetail(destination.kitchen)
+                AppDestination.AppSubscriptionPaywall -> AppDestination.KitchenList
                 AppDestination.BookedDabbas -> AppDestination.KitchenList
                 else -> AppDestination.KitchenList
             })
@@ -120,21 +136,40 @@ class TiffinViewModel(
 
     fun completePurchase() {
         val timestamp = System.currentTimeMillis()
-        val plan = _uiState.value.selectedPlan
-        val returnKitchen = (_uiState.value.destination as? AppDestination.Paywall)?.kitchen
-        if (returnKitchen != null && preferences.completePurchase(timestamp, plan, returnKitchen)) {
+        if (_uiState.value.destination == AppDestination.AppSubscriptionPaywall) {
+            val saved = preferences.completeAppSubscription(timestamp)
+            if (saved) {
+                analytics.track("purchase_completed", mapOf("price" to "1", "product" to "app_subscription"))
+                _uiState.update { it.copy(isAppSubscribed = true, purchaseSaveError = false, destination = AppDestination.KitchenList) }
+            } else {
+                _uiState.update { it.copy(purchaseSaveError = true) }
+            }
+            return
+        }
+        val paywall = _uiState.value.destination as? AppDestination.Paywall
+        if (paywall == null) {
+            _uiState.update { it.copy(purchaseSaveError = true) }
+            return
+        }
+        val returnKitchen = paywall.kitchen
+        val plan = paywall.plan
+        val payableTotal = returnKitchen.pricePerTiffin * plan.mealCredits + if (preferences.isAppSubscribed()) 0 else 1
+        val existingPlan = preferences.purchaseStateFor(returnKitchen.id)
+        val saved = when {
+            existingPlan?.isPaid == true -> preferences.extendPlan(returnKitchen.id, plan)
+            else -> preferences.completePurchase(timestamp, plan, returnKitchen)
+        }
+        if (saved) {
             val state = preferences.purchaseStateFor(returnKitchen.id)
-            analytics.track("purchase_completed", mapOf("price" to "1"))
-            _uiState.update { it.copy(purchaseState = state, subscriptions = preferences.activeSubscriptions(), purchaseSaveError = false, destination = returnKitchen?.let(AppDestination::KitchenDetail) ?: AppDestination.KitchenList) }
+            analytics.track("purchase_completed", mapOf("price" to payableTotal.toString(), "kitchen_id" to returnKitchen.id))
+            _uiState.update { it.copy(purchaseState = state, subscriptions = preferences.activeSubscriptions(), isAppSubscribed = preferences.isAppSubscribed(), purchaseSaveError = false, destination = AppDestination.KitchenDetail(returnKitchen)) }
         } else {
             _uiState.update { it.copy(purchaseSaveError = true) }
         }
     }
 
-    fun extendPlan(kitchen: Kitchen, plan: SubscriptionPlan) {
-        if (preferences.extendPlan(kitchen.id, plan)) {
-            _uiState.update { it.copy(purchaseState = preferences.purchaseStateFor(kitchen.id), subscriptions = preferences.activeSubscriptions(), selectedPlan = plan) }
-        }
+    fun startExtension(kitchen: Kitchen, plan: SubscriptionPlan) {
+        _uiState.update { it.copy(selectedPlansByKitchen = it.selectedPlansByKitchen + (kitchen.id to plan), destination = AppDestination.Paywall(kitchen, plan), purchaseSaveError = false) }
     }
 
     fun bookDabba(kitchen: Kitchen) {
@@ -147,9 +182,9 @@ class TiffinViewModel(
         _uiState.update { it.copy(bookedDabbas = preferences.bookedDabbas(), subscriptions = preferences.activeSubscriptions(), destination = AppDestination.BookedDabbas) }
     }
 
-    fun updateMealPreferences(transform: (MealPreferences) -> MealPreferences) {
+    fun updateMealPreferences(kitchenId: String, transform: (MealPreferences) -> MealPreferences) {
         val updated = transform(_uiState.value.mealPreferences)
-        if (preferences.saveMealPreferences(updated)) _uiState.update { it.copy(mealPreferences = updated) }
+        if (preferences.saveMealPreferences(kitchenId, updated)) _uiState.update { it.copy(mealPreferences = updated) }
     }
 
     class Factory(
